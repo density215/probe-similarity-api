@@ -9,6 +9,8 @@ serde = "1.0.79"
 serde_derive = "1.0.79"
 csv = "1.0.2"
 flate2 = "1.0.2"
+actix="0.7.4"
+actix-web="0.7.8"
 
 [[bin]]
 name = "probe-similarity"

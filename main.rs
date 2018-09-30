@@ -106,26 +106,26 @@ fn load_with_mmap(
     // 12 seconds for 1 mil rows! (non compressed)
     // 14.3 - 15.5 seconds for 1 mil rows (gz compressed)
 
-    // let mut start_time = SteadyTime::now();
-    // // let data = GzDecoder::new(file);
-    // // for line in io::BufReader::new(data).lines().skip(1) {
-    // for line in buffer.lines().skip(1) {
-    //     let line = line.unwrap();
-    //     let b: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
-    //     let prb_id1 = b[0].parse::<u32>()?;
-    //     let prb_id2 = b[1].parse::<u32>()?;
-    //     let pct50_similarity = b[7].parse::<f32>()?;
-    //     let prb_entry = similarity_map.entry(prb_id1).or_insert(vec![]);
-    //     prb_entry.push((prb_id2, pct50_similarity));
+    let mut start_time = SteadyTime::now();
+    // let data = GzDecoder::new(file);
+    // for line in io::BufReader::new(data).lines().skip(1) {
+    for line in buffer.lines().skip(1) {
+        let line = line.unwrap();
+        let b: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
+        let prb_id1 = b[0].parse::<u32>()?;
+        let prb_id2 = b[1].parse::<u32>()?;
+        let pct50_similarity = b[7].parse::<f32>()?;
+        let prb_entry = similarity_map.entry(prb_id1).or_insert(vec![]);
+        prb_entry.push((prb_id2, pct50_similarity));
 
-    //     line_num += 1;
-    //     if line_num % 1_000_000 == 0 || line_num == 1 {
-    //         println!("{:?}", b);
-    //         println!("{:?}mil", line_num / 1_000_000);
-    //         println!("{:?}", SteadyTime::now() - start_time);
-    //         start_time = SteadyTime::now()
-    //     };
-    // }
+        line_num += 1;
+        if line_num % 1_000_000 == 0 || line_num == 1 {
+            println!("{:?}", b);
+            println!("{:?}mil", line_num / 1_000_000);
+            println!("{:?}", SteadyTime::now() - start_time);
+            start_time = SteadyTime::now()
+        };
+    }
 
     // 13 seconds for 1 mil rows
 
@@ -183,53 +183,53 @@ fn load_with_mmap(
     //     };
     // });
 
-    let bb: Vec<String> = buffer.lines().map(|l| l.unwrap()).skip(1).collect();
-    let chunks: Vec<&[String]> = bb.chunks(1_000_000).collect();
+    // let bb: Vec<String> = buffer.lines().map(|l| l.unwrap()).skip(1).collect();
+    // let chunks: Vec<&[String]> = bb.chunks(1_000_000).collect();
 
-    println!("done chunking");
-    let similarity_map = chunks
-        .par_iter()
-        .map(|chunk| {
-            let mut start_time = SteadyTime::now();
-            let chunk = chunk.into_iter().fold(
-                BTreeMap::new(),
-                |mut part_map, r| {
-                    let b: Vec<&str> = r.split_whitespace().collect();
+    // println!("done chunking");
+    // let similarity_map = chunks
+    //     .par_iter()
+    //     .map(|chunk| {
+    //         let mut start_time = SteadyTime::now();
+    //         let chunk = chunk.into_iter().fold(
+    //             BTreeMap::new(),
+    //             |mut part_map, r| {
+    //                 let b: Vec<&str> = r.split_whitespace().collect();
 
-                    let prb_id1 = b[0].parse::<u32>().unwrap();
-                    let prb_id2 = b[1].parse::<u32>().unwrap();
-                    let pct50_similarity = b[7].parse::<f32>().unwrap();
-                    let prb_entry_1 = part_map.entry(prb_id1).or_insert(vec![]);
-                    prb_entry_1.push((prb_id2, pct50_similarity));
-                    let prb_entry_2 = part_map.entry(prb_id2).or_insert(vec![]);
-                    prb_entry_2.push((prb_id1, pct50_similarity));
+    //                 let prb_id1 = b[0].parse::<u32>().unwrap();
+    //                 let prb_id2 = b[1].parse::<u32>().unwrap();
+    //                 let pct50_similarity = b[7].parse::<f32>().unwrap();
+    //                 let prb_entry_1 = part_map.entry(prb_id1).or_insert(vec![]);
+    //                 prb_entry_1.push((prb_id2, pct50_similarity));
+    //                 let prb_entry_2 = part_map.entry(prb_id2).or_insert(vec![]);
+    //                 prb_entry_2.push((prb_id1, pct50_similarity));
 
-                    // println!("{:?}", probe_similarity_map);
-                    // probe_similarity_map.append(&mut next_map);
-                    // probe_similarity_map
-                    // next_map.append(&mut probe_similarity_map);
-                    // next_map
-                    // println!("{:?}", part_map);
-                    part_map
-                },
-            );
-            println!("chunk");
-            println!("{:?}", SteadyTime::now() - start_time);
+    //                 // println!("{:?}", probe_similarity_map);
+    //                 // probe_similarity_map.append(&mut next_map);
+    //                 // probe_similarity_map
+    //                 // next_map.append(&mut probe_similarity_map);
+    //                 // next_map
+    //                 // println!("{:?}", part_map);
+    //                 part_map
+    //             },
+    //         );
+    //         println!("chunk");
+    //         println!("{:?}", SteadyTime::now() - start_time);
 
-            chunk
-        }).reduce(
-            || BTreeMap::new(),
-            |mut total_map, next_chunk_map| {
-                next_chunk_map.into_iter().for_each(|mut kv| {
-                    let mut kkv = kv.1.clone();
-                    let existing_entry = total_map.entry(kv.0).or_insert(vec![]);
-                    existing_entry.append(&mut kkv);
-                    // total_map().append(&mut map);
-                    // total_map()
-                });
-                total_map
-            },
-        );
+    //         chunk
+    //     }).reduce(
+    //         || BTreeMap::new(),
+    //         |mut total_map, next_chunk_map| {
+    //             next_chunk_map.into_iter().for_each(|mut kv| {
+    //                 let mut kkv = kv.1.clone();
+    //                 let existing_entry = total_map.entry(kv.0).or_insert(vec![]);
+    //                 existing_entry.append(&mut kkv);
+    //                 // total_map().append(&mut map);
+    //                 // total_map()
+    //             });
+    //             total_map
+    //         },
+    //     );
     //
     println!("total map");
     // println!("{:?}", similarity_map);

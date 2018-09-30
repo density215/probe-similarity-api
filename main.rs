@@ -187,84 +187,50 @@ fn load_with_mmap(
     let chunks: Vec<&[String]> = bb.chunks(1_000_000).collect();
 
     println!("done chunking");
-    similarity_map = chunks
-        .into_iter()
+    let similarity_map = chunks
+        .par_iter()
         .map(|chunk| {
             let mut start_time = SteadyTime::now();
-            let chunk = chunk
-                .iter()
-                // map each line within the chunk
-                // .map(|r| {
-                //     // let r = r.unwrap();
-                //     let : Vec<&str> = r.split_whitespace().collect();
+            let chunk = chunk.into_iter().fold(
+                BTreeMap::new(),
+                |mut part_map, r| {
+                    let b: Vec<&str> = r.split_whitespace().collect();
 
-                //     let prb_id1 = b[0].parse::<u32>().unwrap();
-                //     let prb_id2 = b[1].parse::<u32>().unwrap();
-                //     let pct50_similarity = b[7].parse::<f32>().unwrap();
+                    let prb_id1 = b[0].parse::<u32>().unwrap();
+                    let prb_id2 = b[1].parse::<u32>().unwrap();
+                    let pct50_similarity = b[7].parse::<f32>().unwrap();
+                    let prb_entry_1 = part_map.entry(prb_id1).or_insert(vec![]);
+                    prb_entry_1.push((prb_id2, pct50_similarity));
+                    let prb_entry_2 = part_map.entry(prb_id2).or_insert(vec![]);
+                    prb_entry_2.push((prb_id1, pct50_similarity));
 
-                //     // we want this table to symmetrical, so we push to both
-                //     // a record on key prb_1 and one with a key on prb_2
-                //     // let prb_entry_1 = part_map.entry(prb_id1).or_insert(vec![]);
-                //     // prb_entry_1.push((prb_id2, pct50_similarity));
-                //     // let prb_entry_2 = part_map.entry(prb_id2).or_insert(vec![]);
-                //     // prb_entry_2.push((prb_id1, pct50_similarity));
-                //     // }
-
-                //     // line_num += 1;
-                //     // if line_num % 1_000_000 == 0 || line_num == 1 {
-                //     //     println!("{:?}", b);
-                //     //     println!("{:?}mil", line_num / 1_000_000);
-                //     //     println!("{:?}", SteadyTime::now() - start_time);
-                //     //     start_time = SteadyTime::now()
-                //     // };
-                //     // part_map
-                //     (prb_id1, prb_id2, pct50_similarity)
-                .fold(
-                    BTreeMap::new(),
-                    |mut part_map: BTreeMap<u32, Vec<(u32, f32)>>, r| {
-                        let b: Vec<&str> = r.split_whitespace().collect();
-
-                        let prb_id1 = b[0].parse::<u32>().unwrap();
-                        let prb_id2 = b[1].parse::<u32>().unwrap();
-                        let pct50_similarity = b[7].parse::<f32>().unwrap();
-                        let prb_entry_1 = part_map.entry(prb_id1).or_insert(vec![]);
-                        prb_entry_1.push((prb_id2, pct50_similarity));
-                        let prb_entry_2 = part_map.entry(prb_id2).or_insert(vec![]);
-                        prb_entry_2.push((prb_id1, pct50_similarity));
-
-                        // println!("{:?}", probe_similarity_map);
-                        // probe_similarity_map.append(&mut next_map);
-                        // probe_similarity_map
-                        // next_map.append(&mut probe_similarity_map);
-                        // next_map
-                        // println!("{:?}", part_map);
-                        part_map
-                    },
-                );
+                    // println!("{:?}", probe_similarity_map);
+                    // probe_similarity_map.append(&mut next_map);
+                    // probe_similarity_map
+                    // next_map.append(&mut probe_similarity_map);
+                    // next_map
+                    // println!("{:?}", part_map);
+                    part_map
+                },
+            );
             println!("chunk");
             println!("{:?}", SteadyTime::now() - start_time);
 
             chunk
-        }).fold(
-            BTreeMap::new(),
-            |mut total_map: BTreeMap<u32, Vec<(u32, f32)>>,
-             next_chunk_map: BTreeMap<u32, Vec<(u32, f32)>>| {
-                next_chunk_map.into_iter().for_each(|kv| {
-                    // let (key, mut value) = kv;
+        }).reduce(
+            || BTreeMap::new(),
+            |mut total_map, next_chunk_map| {
+                next_chunk_map.into_iter().for_each(|mut kv| {
                     let mut kkv = kv.1.clone();
                     let existing_entry = total_map.entry(kv.0).or_insert(vec![]);
                     existing_entry.append(&mut kkv);
-                    // let exist_value: Option<Vec<(u32, f32)>> = total_map.insert(*key, *value);
-                    // let new_value = match exist_value {
-                    //     Some(v) => { v.push(*value); v },
-                    //     None => *value,
-                    // };
+                    // total_map().append(&mut map);
+                    // total_map()
                 });
-                // total_map.append(&mut next_chunk_map)
                 total_map
             },
         );
-
+    //
     println!("total map");
     // println!("{:?}", similarity_map);
 

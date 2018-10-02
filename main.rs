@@ -264,7 +264,7 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
 
 fn main() {
     let sys = actix::System::new("probe-similarity");
-    let similarity_map = match load_with_bufreader_multithreaded() {
+    let similarity_map = match load_with_cursor_single_thread() {
         Ok(sm) => Arc::new(sm),
         Err(e) => {
             println!("{}", e);

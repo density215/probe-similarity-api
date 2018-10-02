@@ -12,11 +12,12 @@ extern crate serde;
 extern crate time;
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead};
 use std::str;
 use std::sync::Arc;
@@ -135,7 +136,6 @@ fn load_with_cursor_single_thread() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Bo
     Ok(similarity_map)
 }
 
-
 fn get_first_arg() -> Result<OsString, Box<Error>> {
     match env::args_os().nth(1) {
         None => Err(From::from(
@@ -158,7 +158,7 @@ struct AppState {
 
 #[derive(Deserialize)]
 struct Info {
-    prb_id: u32,
+    prb_id: String,
 }
 
 #[derive(Deserialize)]
@@ -167,7 +167,7 @@ struct QueryInfo {
     mode: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SimilarProbe {
     prb_id: u32,
     similarity: f32,
@@ -179,41 +179,92 @@ struct JsonResult {
     result: Vec<SimilarProbe>,
 }
 
+// struct PrbSimPair(u32, f32);
+
+impl PartialEq for SimilarProbe {
+    // use only the prb_id in this tuple
+    // for matching them as the same element
+    fn eq(&self, other: &SimilarProbe) -> bool {
+        self.prb_id == other.prb_id
+    }
+}
+
+impl Eq for SimilarProbe {}
+
+impl Hash for SimilarProbe {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.prb_id.hash(state);
+    }
+}
+
 fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<JsonResult>> {
     let (state, path, query) = data;
     println!("{:?}", path.prb_id);
     println!("{:?}", query.cutoff);
     println!("{:?}", query.mode);
-    let mut s: Vec<SimilarProbe> = state
-        .similarity_map
-        .get(&path.prb_id)
-        .unwrap()
-        .into_iter()
-        .filter(|ps| {
-            if query.mode == "dissimilar" {
-                ps.1 <= query.cutoff
-            } else {
-                ps.1 >= query.cutoff
-            }
-        }).map(|v| SimilarProbe {
-            prb_id: v.0,
-            similarity: v.1,
-        }).collect();
 
-    s.sort_by(|a, b| {
+    let hs: HashSet<SimilarProbe> = path
+        .prb_id
+        .split(",")
+        .map(|prb_id_str| {
+            let prb_id = &prb_id_str.parse::<u32>().unwrap();
+            let mut probes_set: HashSet<SimilarProbe> = HashSet::new();
+
+            state
+                .similarity_map
+                .get(prb_id)
+                .unwrap()
+                .into_iter()
+                .filter(|ps| {
+                    if query.mode == "dissimilar" {
+                        ps.1 <= query.cutoff
+                    } else {
+                        ps.1 >= query.cutoff
+                    }
+                }).for_each(|v| {
+                    probes_set.insert(SimilarProbe {
+                        prb_id: v.0,
+                        similarity: v.1,
+                    });
+                });
+            // probes_set.iter().for_each(|p| println!("{:?}", p.prb_id));
+            probes_set
+        }).fold(
+            HashSet::new(),
+            |intersect_probes: HashSet<SimilarProbe>, probes_set: HashSet<SimilarProbe>| {
+                if intersect_probes.len() != 0 {
+                    intersect_probes
+                        .intersection(&probes_set)
+                        .cloned()
+                        .collect()
+                } else {
+                    probes_set
+                }
+            },
+        );
+
+    let mut v = hs
+        .into_iter()
+        .fold(Vec::new(), |mut vec: Vec<SimilarProbe>, p: SimilarProbe| {
+            vec.push(p);
+            vec
+        });
+
+    v.sort_by(|a, b| {
         b.similarity
             .partial_cmp(&a.similarity)
             .unwrap_or(Ordering::Equal)
     });
+
     Ok(Json(JsonResult {
-        count: s.len(),
-        result: s,
+        count: v.len(),
+        result: v,
     }))
 }
 
 fn main() {
     let sys = actix::System::new("probe-similarity");
-    let similarity_map = match load_with_cursor_single_thread() {
+    let similarity_map = match load_with_bufreader_multithreaded() {
         Ok(sm) => Arc::new(sm),
         Err(e) => {
             println!("{}", e);

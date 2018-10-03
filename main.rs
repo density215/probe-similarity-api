@@ -22,7 +22,7 @@ use std::io::{self, BufRead};
 use std::str;
 use std::sync::Arc;
 
-use actix_web::{http, server, App, Json, Path, Query, Result, State};
+use actix_web::{http, server, App, HttpRequest, Json, Path, Query, Result, State};
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use time::SteadyTime;
@@ -262,6 +262,41 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
     }))
 }
 
+fn nadir<'a>(state: (State<AppState>)) -> Result<Json<String>> {
+    let nadir_probe = &state.similarity_map.iter().max_by(
+        |a: &(&u32, &Vec<(u32, f32)>), b: &(&u32, &Vec<(u32, f32)>)| {
+            let a_max: f32 =
+                a.1.iter()
+                    .map(|v: &(u32, f32)| v.1)
+                    .filter(|s| *s > 0.3)
+                    .sum::<f32>()
+                    .floor();
+            let b_max: f32 =
+                b.1.iter()
+                    .map(|v: &(u32, f32)| v.1)
+                    .filter(|s| *s > 0.3)
+                    .sum::<f32>()
+                    .floor();
+
+            let a_max_int = a_max as u32;
+            let b_max_int = b_max as u32;
+
+            a_max_int.cmp(&b_max_int)
+        },
+    );
+
+    let prb_id: String = match nadir_probe {
+        Some(np) => np.0.to_string(),
+        _ => "no nadir probe".to_string(),
+    };
+
+    Ok(Json(prb_id))
+}
+
+fn p404(req: &HttpRequest) -> Result<Json<String>> {
+    Ok(Json(("not found").to_string()))
+}
+
 fn main() {
     let sys = actix::System::new("probe-similarity");
     let similarity_map = match load_with_cursor_single_thread() {
@@ -278,10 +313,17 @@ fn main() {
     };
 
     server::new(move || {
-        App::with_state(AppState {
-            similarity_map: Arc::clone(&similarity_map),
-        }).prefix("/probe-similarity")
-        .resource("/{prb_id}", |r| r.method(http::Method::GET).with(index))
+        vec![
+            App::with_state(AppState {
+                similarity_map: Arc::clone(&similarity_map),
+            }).prefix("/probe-similarity")
+            .resource("/nadir", |r| r.method(http::Method::GET).with(nadir))
+            .resource("/{prb_id}", |r| r.method(http::Method::GET).with(index))
+            .boxed(),
+            App::new()
+                .default_resource(|r| r.method(http::Method::GET).f(&p404))
+                .boxed(),
+        ]
     }).bind(&bind_address)
     .unwrap()
     .start();

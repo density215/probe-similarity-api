@@ -62,7 +62,8 @@ fn load_with_bufreader_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
 
                 part_map
             },
-        ).reduce(
+        )
+        .reduce(
             || BTreeMap::new(),
             |mut total_map, next_chunk_map| {
                 next_chunk_map.into_iter().for_each(|kv| {
@@ -221,7 +222,8 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
                     } else {
                         ps.1 >= query.cutoff
                     }
-                }).for_each(|v| {
+                })
+                .for_each(|v| {
                     probes_set.insert(SimilarProbe {
                         prb_id: v.0,
                         similarity: v.1,
@@ -229,7 +231,8 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
                 });
             // probes_set.iter().for_each(|p| println!("{:?}", p.prb_id));
             probes_set
-        }).fold(
+        })
+        .fold(
             HashSet::new(),
             |intersect_probes: HashSet<SimilarProbe>, probes_set: HashSet<SimilarProbe>| {
                 if intersect_probes.len() != 0 {
@@ -316,7 +319,8 @@ fn main() {
         vec![
             App::with_state(AppState {
                 similarity_map: Arc::clone(&similarity_map),
-            }).prefix("/probe-similarity")
+            })
+            .prefix("/probe-similarity")
             .resource("/nadir", |r| r.method(http::Method::GET).with(nadir))
             .resource("/{prb_id}", |r| r.method(http::Method::GET).with(index))
             .boxed(),
@@ -324,7 +328,8 @@ fn main() {
                 .default_resource(|r| r.method(http::Method::GET).f(&p404))
                 .boxed(),
         ]
-    }).bind(&bind_address)
+    })
+    .bind(&bind_address)
     .unwrap()
     .start();
 

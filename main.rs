@@ -122,11 +122,7 @@ fn load_avro_from_file() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {
 
     let reader_schema = Schema::parse_str(schema).unwrap();
 
-    // let file_path = get_first_arg()?;
     let data_dir = read_dir(BQ_DATA_PATH)?;
-    // let stdin = std::io::stdin();
-    // let stdin = stdin.lock();
-    // let ss = BufReader::new(stdin);
 
     data_dir.into_iter().for_each(|file| {
         let file_path = file.unwrap().path();
@@ -155,9 +151,10 @@ fn load_avro_from_file() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {
 
                 if tot_rec_num % 1_000_000 == 0 || tot_rec_num < 1 {
                     println!(
-                        "{:?}mil records loaded in {:?}s...",
+                        "{:?}mil records loaded in {:?}s from file {:?}..",
                         tot_rec_num / 1_000_000,
                         (SteadyTime::now() - start_time).num_seconds(),
+                        &file_path
                     );
                 };
                 tot_rec_num += 1;
@@ -177,7 +174,6 @@ fn load_avro_from_file() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {
 
 fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {
     let start_time = SteadyTime::now();
-    // let mut similarity_map: BTreeMap<u32, Vec<(u32, f32)>>;
 
     let schema = r#"{
         "type": "record",
@@ -193,19 +189,12 @@ fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
 
     let reader_schema = Schema::parse_str(schema).unwrap();
 
-    // let file_path = get_first_arg()?;
     let data_dir = read_dir(BQ_DATA_PATH)?;
-    // let stdin = std::io::stdin();
-    // let stdin = stdin.lock();
-    // let ss = BufReader::new(stdin);
 
     let f_map: Vec<std::path::PathBuf> = data_dir
-        // .into_iter()
         .map(|f| -> Option<std::path::PathBuf> {
-            // let file_path = f.unwrap().path();
             let file = f.unwrap();
             let file_name = &file.file_name();
-            println!("{:?}", &file_name.to_str().unwrap()[..BQ_FILE_REGEX.len()]);
             if &file_name.to_str().unwrap()[..BQ_FILE_REGEX.len()] == BQ_FILE_REGEX {
                 let file_path = file.path();
                 println!("selected {:?}...", file_path);
@@ -217,14 +206,11 @@ fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
         .filter_map(|f| f)
         .collect();
 
-    println!("found files: {:?}", f_map);
     let similarity_map = f_map
         .par_iter()
-        .enumerate()
         .fold(
-            || BTreeMap::new(),
-            |mut part_map: BTreeMap<u32, Vec<(u32, f32)>>, (rec_num, file_path)| {
-                let mut tot_rec_num: usize = 0;
+            || (0, BTreeMap::new()),
+            |mut part_map: (usize, BTreeMap<u32, Vec<(u32, f32)>>), file_path| {
                 let f = File::open(file_path).unwrap();
                 let source = Reader::with_schema(&reader_schema, f).unwrap();
 
@@ -240,45 +226,61 @@ fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
                         let pct50_similarity =
                             avro_rs::from_value::<f32>(&nn.find(|kv| kv.0 == "median5").unwrap().1)
                                 .unwrap();
-                        let prb_entry1 = part_map.entry(prb_id1).or_insert(vec![]);
+                        let prb_entry1 = part_map.1.entry(prb_id1).or_insert(vec![]);
                         prb_entry1.push((prb_id2, pct50_similarity));
 
-                        let prb_entry2 = part_map.entry(prb_id2).or_insert(vec![]);
+                        let prb_entry2 = part_map.1.entry(prb_id2).or_insert(vec![]);
                         prb_entry2.push((prb_id1, pct50_similarity));
 
-                        if tot_rec_num % 1_000_000 == 0 || tot_rec_num < 1 {
+                        let dur = SteadyTime::now() - start_time;
+                        if part_map.0 % 1_000_000 == 0 || part_map.0 < 1 {
                             println!(
-                                "{:?}mil records loaded in {:?}s...",
-                                tot_rec_num / 1_000_000,
-                                (SteadyTime::now() - start_time).num_seconds(),
+                                "{:?}mil records loaded in {}s from file {:?}...",
+                                part_map.0 / 1_000_000,
+                                dur.num_milliseconds() as f32 / 1000.0 as f32,
+                                file_path
                             );
                         };
-                        tot_rec_num += 1;
+                        part_map.0 += 1;
                     }
                     err => {
                         println!("some err");
                         println!("{:?}", err);
                     }
                 });
-                println!("total records processed: {}", tot_rec_num);
-                println!("total records in map: {}", &part_map.len());
+                println!(
+                    "total records processed in file {:?}: {}",
+                    &file_path, &part_map.0
+                );
+                println!(
+                    "total probe records in map in file {:?}: {}",
+                    &*file_path,
+                    &part_map.1.len()
+                );
 
                 part_map
             },
         )
         .reduce(
-            || BTreeMap::new(),
+            || (0, BTreeMap::new()),
             |mut total_map, next_chunk_map| {
-                next_chunk_map.into_iter().for_each(|kv| {
-                    let mut kkv = kv.1.clone();
-                    let existing_entry = total_map.entry(kv.0).or_insert(vec![]);
-                    existing_entry.append(&mut kkv);
+                next_chunk_map.1.into_iter().for_each(|mut kv| {
+                    let existing_entry = total_map.1.entry(kv.0).or_insert(vec![]);
+                    existing_entry.append(&mut kv.1);
                 });
+                total_map.0 += next_chunk_map.0;
                 total_map
             },
         );
 
-    Ok(similarity_map)
+    let dur = SteadyTime::now() - start_time;
+    println!(
+        "grand total of {} records loaded in {}s",
+        similarity_map.0,
+        dur.num_milliseconds() as f32 / 1000.0
+    );
+    println!("grand total of {} probes in map", similarity_map.1.len());
+    Ok(similarity_map.1)
 }
 
 fn load_with_bufreader_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {

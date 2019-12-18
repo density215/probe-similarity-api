@@ -1,6 +1,13 @@
 #[macro_use]
 extern crate serde_derive;
 
+use std::{
+    io::{stdin, BufReader, Read},
+    // path::Path,
+    prelude::*,
+    task,
+};
+
 extern crate actix;
 extern crate actix_web;
 extern crate csv;
@@ -16,7 +23,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{read_dir, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead};
 use std::str;
@@ -26,6 +33,253 @@ use actix_web::{http, server, App, HttpRequest, Json, Path, Query, Result, State
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use time::SteadyTime;
+
+use avro_rs::Reader;
+
+// for write test
+use avro_rs::types::{Record, Value};
+use avro_rs::Schema;
+use avro_rs::Writer;
+
+const BQ_DATA_PATH: &str = "./bq_data";
+const BQ_FILE_REGEX: &str = "jaccard_similarity_ipv4_2019-12-16_";
+
+fn load_avro_from_stdin() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<dyn Error>> {
+    let start_time = SteadyTime::now();
+    let mut similarity_map: BTreeMap<u32, Vec<(u32, f32)>> = BTreeMap::new();
+    let mut tot_rec_num: usize = 0;
+
+    let schema = r#"{
+        "type": "record",
+        "name": "test",
+        "fields": [
+            {"name": "prbId1", "type": "long"},
+            {"name": "prbId2", "type": "long"},
+            {"name": "median25", "type": "double"},
+            {"name": "median5", "type": "double"},
+            {"name": "median75", "type": "double"}
+        ]
+    }"#;
+
+    let reader_schema = Schema::parse_str(schema).unwrap();
+    let stdin = std::io::stdin();
+    let stdin = stdin.lock();
+    // let ss = BufReader::new(stdin);
+    let source = Reader::with_schema(&reader_schema, stdin).unwrap();
+
+    source.for_each(|chunk: Result<Value, _>| match chunk.unwrap() {
+        Value::Record(n) => {
+            let mut nn = n.into_iter();
+            let prb_id1 =
+                avro_rs::from_value::<u32>(&nn.find(|kv| kv.0 == "prbId1").unwrap().1).unwrap();
+            let prb_id2 =
+                avro_rs::from_value::<u32>(&nn.find(|kv| kv.0 == "prbId2").unwrap().1).unwrap();
+            let pct50_similarity =
+                avro_rs::from_value::<f32>(&nn.find(|kv| kv.0 == "median5").unwrap().1).unwrap();
+
+            let prb_entry1 = similarity_map.entry(prb_id1).or_insert(vec![]);
+            prb_entry1.push((prb_id2, pct50_similarity));
+
+            let prb_entry2 = similarity_map.entry(prb_id2).or_insert(vec![]);
+            prb_entry2.push((prb_id1, pct50_similarity));
+
+            if tot_rec_num % 1_000_000 == 0 || tot_rec_num < 1 {
+                println!(
+                    "{:?}mil records loaded in {:?}s...",
+                    tot_rec_num / 1_000_000,
+                    (SteadyTime::now() - start_time).num_seconds(),
+                );
+            };
+            tot_rec_num += 1;
+        }
+        err => {
+            println!("some err");
+            println!("{:?}", err);
+        }
+    });
+    println!("total records processed: {}", tot_rec_num);
+    println!("total records in map: {}", &similarity_map.len());
+
+    Ok(similarity_map)
+}
+
+fn load_avro_from_file() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {
+    let start_time = SteadyTime::now();
+    let mut similarity_map: BTreeMap<u32, Vec<(u32, f32)>> = BTreeMap::new();
+    let mut tot_rec_num: usize = 0;
+
+    let schema = r#"{
+        "type": "record",
+        "name": "test",
+        "fields": [
+            {"name": "prbId1", "type": "long"},
+            {"name": "prbId2", "type": "long"},
+            {"name": "median25", "type": "double"},
+            {"name": "median5", "type": "double"},
+            {"name": "median75", "type": "double"}
+        ]
+    }"#;
+
+    let reader_schema = Schema::parse_str(schema).unwrap();
+
+    // let file_path = get_first_arg()?;
+    let data_dir = read_dir(BQ_DATA_PATH)?;
+    // let stdin = std::io::stdin();
+    // let stdin = stdin.lock();
+    // let ss = BufReader::new(stdin);
+
+    data_dir.into_iter().for_each(|file| {
+        let file_path = file.unwrap().path();
+        if &file_path.to_str().unwrap()[..BQ_FILE_REGEX.len()] != BQ_FILE_REGEX {
+            ()
+        }
+
+        let file = File::open(&file_path).unwrap();
+        let source = Reader::with_schema(&reader_schema, file).unwrap();
+
+        source.for_each(|chunk: Result<Value, _>| match chunk.unwrap() {
+            Value::Record(n) => {
+                let mut nn = n.into_iter();
+                let prb_id1 =
+                    avro_rs::from_value::<u32>(&nn.find(|kv| kv.0 == "prbId1").unwrap().1).unwrap();
+                let prb_id2 =
+                    avro_rs::from_value::<u32>(&nn.find(|kv| kv.0 == "prbId2").unwrap().1).unwrap();
+                let pct50_similarity =
+                    avro_rs::from_value::<f32>(&nn.find(|kv| kv.0 == "median5").unwrap().1)
+                        .unwrap();
+                let prb_entry1 = similarity_map.entry(prb_id1).or_insert(vec![]);
+                prb_entry1.push((prb_id2, pct50_similarity));
+
+                let prb_entry2 = similarity_map.entry(prb_id2).or_insert(vec![]);
+                prb_entry2.push((prb_id1, pct50_similarity));
+
+                if tot_rec_num % 1_000_000 == 0 || tot_rec_num < 1 {
+                    println!(
+                        "{:?}mil records loaded in {:?}s...",
+                        tot_rec_num / 1_000_000,
+                        (SteadyTime::now() - start_time).num_seconds(),
+                    );
+                };
+                tot_rec_num += 1;
+            }
+            err => {
+                println!("some err");
+                println!("{:?}", err);
+            }
+        });
+        println!("file: {:?}", file_path);
+        println!("total records processed: {}", tot_rec_num);
+        println!("total records in map: {}", &similarity_map.len());
+    });
+
+    Ok(similarity_map)
+}
+
+fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {
+    let start_time = SteadyTime::now();
+    // let mut similarity_map: BTreeMap<u32, Vec<(u32, f32)>>;
+
+    let schema = r#"{
+        "type": "record",
+        "name": "test",
+        "fields": [
+            {"name": "prbId1", "type": "long"},
+            {"name": "prbId2", "type": "long"},
+            {"name": "median25", "type": "double"},
+            {"name": "median5", "type": "double"},
+            {"name": "median75", "type": "double"}
+        ]
+    }"#;
+
+    let reader_schema = Schema::parse_str(schema).unwrap();
+
+    // let file_path = get_first_arg()?;
+    let data_dir = read_dir(BQ_DATA_PATH)?;
+    // let stdin = std::io::stdin();
+    // let stdin = stdin.lock();
+    // let ss = BufReader::new(stdin);
+
+    let f_map: Vec<std::path::PathBuf> = data_dir
+        // .into_iter()
+        .map(|f| -> Option<std::path::PathBuf> {
+            // let file_path = f.unwrap().path();
+            let file = f.unwrap();
+            let file_name = &file.file_name();
+            println!("{:?}", &file_name.to_str().unwrap()[..BQ_FILE_REGEX.len()]);
+            if &file_name.to_str().unwrap()[..BQ_FILE_REGEX.len()] == BQ_FILE_REGEX {
+                let file_path = file.path();
+                println!("selected {:?}...", file_path);
+                Some(file_path)
+            } else {
+                None
+            }
+        })
+        .filter_map(|f| f)
+        .collect();
+
+    println!("found files: {:?}", f_map);
+    let similarity_map = f_map
+        .par_iter()
+        .enumerate()
+        .fold(
+            || BTreeMap::new(),
+            |mut part_map: BTreeMap<u32, Vec<(u32, f32)>>, (rec_num, file_path)| {
+                let mut tot_rec_num: usize = 0;
+                let f = File::open(file_path).unwrap();
+                let source = Reader::with_schema(&reader_schema, f).unwrap();
+
+                source.for_each(|chunk: Result<Value, _>| match chunk.unwrap() {
+                    Value::Record(n) => {
+                        let mut nn = n.into_iter();
+                        let prb_id1 =
+                            avro_rs::from_value::<u32>(&nn.find(|kv| kv.0 == "prbId1").unwrap().1)
+                                .unwrap();
+                        let prb_id2 =
+                            avro_rs::from_value::<u32>(&nn.find(|kv| kv.0 == "prbId2").unwrap().1)
+                                .unwrap();
+                        let pct50_similarity =
+                            avro_rs::from_value::<f32>(&nn.find(|kv| kv.0 == "median5").unwrap().1)
+                                .unwrap();
+                        let prb_entry1 = part_map.entry(prb_id1).or_insert(vec![]);
+                        prb_entry1.push((prb_id2, pct50_similarity));
+
+                        let prb_entry2 = part_map.entry(prb_id2).or_insert(vec![]);
+                        prb_entry2.push((prb_id1, pct50_similarity));
+
+                        if tot_rec_num % 1_000_000 == 0 || tot_rec_num < 1 {
+                            println!(
+                                "{:?}mil records loaded in {:?}s...",
+                                tot_rec_num / 1_000_000,
+                                (SteadyTime::now() - start_time).num_seconds(),
+                            );
+                        };
+                        tot_rec_num += 1;
+                    }
+                    err => {
+                        println!("some err");
+                        println!("{:?}", err);
+                    }
+                });
+                println!("total records processed: {}", tot_rec_num);
+                println!("total records in map: {}", &part_map.len());
+
+                part_map
+            },
+        )
+        .reduce(
+            || BTreeMap::new(),
+            |mut total_map, next_chunk_map| {
+                next_chunk_map.into_iter().for_each(|kv| {
+                    let mut kkv = kv.1.clone();
+                    let existing_entry = total_map.entry(kv.0).or_insert(vec![]);
+                    existing_entry.append(&mut kkv);
+                });
+                total_map
+            },
+        );
+
+    Ok(similarity_map)
+}
 
 fn load_with_bufreader_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<Error>> {
     let file_path = get_first_arg()?;
@@ -43,7 +297,7 @@ fn load_with_bufreader_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
         .enumerate()
         .fold(
             || BTreeMap::new(),
-            |mut part_map, (line_num, line)| {
+            |mut part_map, (line_num, line)| -> BTreeMap<u32, Vec<(u32, f32)>> {
                 let b: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
 
                 let prb_id1 = b[0].parse::<u32>().unwrap();
@@ -62,7 +316,8 @@ fn load_with_bufreader_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
 
                 part_map
             },
-        ).reduce(
+        )
+        .reduce(
             || BTreeMap::new(),
             |mut total_map, next_chunk_map| {
                 next_chunk_map.into_iter().for_each(|kv| {
@@ -221,7 +476,8 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
                     } else {
                         ps.1 >= query.cutoff
                     }
-                }).for_each(|v| {
+                })
+                .for_each(|v| {
                     probes_set.insert(SimilarProbe {
                         prb_id: v.0,
                         similarity: v.1,
@@ -229,7 +485,8 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
                 });
             // probes_set.iter().for_each(|p| println!("{:?}", p.prb_id));
             probes_set
-        }).fold(
+        })
+        .fold(
             HashSet::new(),
             |intersect_probes: HashSet<SimilarProbe>, probes_set: HashSet<SimilarProbe>| {
                 if intersect_probes.len() != 0 {
@@ -262,7 +519,7 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
     }))
 }
 
-fn nadir<'a>(state: (State<AppState>)) -> Result<Json<String>> {
+fn nadir<'a>(state: State<AppState>) -> Result<Json<String>> {
     let nadir_probe = &state.similarity_map.iter().max_by(
         |a: &(&u32, &Vec<(u32, f32)>), b: &(&u32, &Vec<(u32, f32)>)| {
             let a_max: f32 =
@@ -299,7 +556,15 @@ fn p404(req: &HttpRequest) -> Result<Json<String>> {
 
 fn main() {
     let sys = actix::System::new("probe-similarity");
-    let similarity_map = match load_with_cursor_single_thread() {
+    // let similarity_map = match load_with_cursor_single_thread() {
+    //     Ok(sm) => Arc::new(sm),
+    //     Err(e) => {
+    //         println!("{}", e);
+    //         std::process::exit(1);
+    //     }
+    // };
+
+    let similarity_map = match load_avro_from_file_multithreaded() {
         Ok(sm) => Arc::new(sm),
         Err(e) => {
             println!("{}", e);
@@ -316,7 +581,8 @@ fn main() {
         vec![
             App::with_state(AppState {
                 similarity_map: Arc::clone(&similarity_map),
-            }).prefix("/probe-similarity")
+            })
+            .prefix("/probe-similarity")
             .resource("/nadir", |r| r.method(http::Method::GET).with(nadir))
             .resource("/{prb_id}", |r| r.method(http::Method::GET).with(index))
             .boxed(),
@@ -324,7 +590,8 @@ fn main() {
                 .default_resource(|r| r.method(http::Method::GET).f(&p404))
                 .boxed(),
         ]
-    }).bind(&bind_address)
+    })
+    .bind(&bind_address)
     .unwrap()
     .start();
 

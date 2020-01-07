@@ -8,16 +8,6 @@ use std::{
     task,
 };
 
-extern crate actix;
-extern crate actix_web;
-extern crate csv;
-extern crate flate2;
-extern crate memmap;
-extern crate quickersort;
-extern crate rayon;
-extern crate serde;
-extern crate time;
-
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
@@ -26,10 +16,11 @@ use std::ffi::OsString;
 use std::fs::{read_dir, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead};
+use std::iter::FromIterator;
 use std::str;
 use std::sync::Arc;
 
-use actix_web::{http, server, App, HttpRequest, Json, Path, Query, Result, State};
+use actix_web::{http, web, App, HttpRequest, HttpServer};
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use time::SteadyTime;
@@ -213,7 +204,6 @@ fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
             |mut part_map: (usize, BTreeMap<u32, Vec<(u32, f32)>>), file_path| {
                 let f = File::open(file_path).unwrap();
                 let source = Reader::with_schema(&reader_schema, f).unwrap();
-
                 source.for_each(|chunk: Result<Value, _>| match chunk.unwrap() {
                     Value::Record(n) => {
                         let mut nn = n.into_iter();
@@ -418,10 +408,17 @@ struct Info {
     prb_id: String,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+#[serde(rename_all = "lowercase")]
+enum Mode {
+    Similar,
+    Dissimilar,
+}
+
 #[derive(Deserialize)]
 struct QueryInfo {
-    cutoff: f32,
-    mode: String,
+    cutoff: Option<f32>,
+    mode: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -435,6 +432,9 @@ struct JsonResult {
     count: usize,
     result: Vec<SimilarProbe>,
 }
+
+#[derive(Serialize)]
+struct NadirResult(Vec<(u32, f32)>);
 
 // struct PrbSimPair(u32, f32);
 
@@ -454,11 +454,38 @@ impl Hash for SimilarProbe {
     }
 }
 
-fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<JsonResult>> {
+async fn index(
+    data: (web::Data<AppState>, web::Path<Info>, web::Query<QueryInfo>),
+) -> std::io::Result<web::Json<JsonResult>> {
     let (state, path, query) = data;
     println!("{:?}", path.prb_id);
     println!("{:?}", query.cutoff);
     println!("{:?}", query.mode);
+    let mut cutoff: f32 = 0.0;
+    let mut query_err: Vec<&str> = vec![];
+
+    if let Some(co) = query.cutoff {
+        cutoff = co;
+    } else {
+        query_err.push("cutoff");
+    };
+
+    let mode = if let Some(mode) = &query.mode {
+        mode
+    } else {
+        "similar"
+    };
+
+    if query_err.len() > 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "queryparameter{}: `{}` required",
+                if query_err.len() == 1 { "" } else { "s" },
+                query_err.join("`,`")
+            ),
+        ));
+    };
 
     let hs: HashSet<SimilarProbe> = path
         .prb_id
@@ -473,10 +500,10 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
                 .unwrap()
                 .into_iter()
                 .filter(|ps| {
-                    if query.mode == "dissimilar" {
-                        ps.1 <= query.cutoff
+                    if mode == "dissimilar" {
+                        ps.1 <= cutoff
                     } else {
-                        ps.1 >= query.cutoff
+                        ps.1 >= cutoff
                     }
                 })
                 .for_each(|v| {
@@ -515,57 +542,91 @@ fn index(data: (State<AppState>, Path<Info>, Query<QueryInfo>)) -> Result<Json<J
             .unwrap_or(Ordering::Equal)
     });
 
-    Ok(Json(JsonResult {
+    Ok(web::Json(JsonResult {
         count: v.len(),
         result: v,
     }))
 }
 
-fn nadir<'a>(state: State<AppState>) -> Result<Json<String>> {
-    let nadir_probe = &state.similarity_map.iter().max_by(
-        |a: &(&u32, &Vec<(u32, f32)>), b: &(&u32, &Vec<(u32, f32)>)| {
-            let a_max: f32 =
-                a.1.iter()
-                    .map(|v: &(u32, f32)| v.1)
-                    .filter(|s| *s > 0.3)
-                    .sum::<f32>()
-                    .floor();
-            let b_max: f32 =
-                b.1.iter()
-                    .map(|v: &(u32, f32)| v.1)
-                    .filter(|s| *s > 0.3)
-                    .sum::<f32>()
-                    .floor();
+async fn nadir(
+    data: (web::Data<AppState>, web::Query<QueryInfo>),
+) -> std::io::Result<web::Json<NadirResult>> {
+    let (state, query) = data;
+    println!("{:?} nadir", query.mode);
+    let mut mode: Mode = Mode::Similar;
+    let mut query_err: Vec<&str> = vec![];
 
-            let a_max_int = a_max as u32;
-            let b_max_int = b_max as u32;
-
-            a_max_int.cmp(&b_max_int)
-        },
-    );
-
-    let prb_id: String = match nadir_probe {
-        Some(np) => np.0.to_string(),
-        _ => "no nadir probe".to_string(),
+    if let Some(m) = &query.mode {
+        match m.as_str() {
+            "similar" => {
+                mode = Mode::Similar;
+            }
+            "dissimilar" => {
+                mode = Mode::Dissimilar;
+            }
+            _ => {
+                query_err.push("mode");
+            }
+        }
     };
 
-    Ok(Json(prb_id))
+    let cutoff = if let Some(co) = query.cutoff {
+        co
+    } else {
+        match mode {
+            // kick out low similarities
+            Mode::Similar => 0.3,
+            // kick out probes that are basically the same out by default
+            Mode::Dissimilar => 0.99,
+        }
+    };
+
+    if query_err.len() > 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "queryparameter{}: `{}` invalid",
+                if query_err.len() == 1 { "" } else { "s" },
+                query_err.join("`,`")
+            ),
+        ));
+    };
+
+    // let sim_iter = state.similarity_map.iter();
+    let mut sim_sums: Vec<(u32, f32)> = Vec::from_iter(state.similarity_map.iter().map(|kv| {
+        (
+            *kv.0,
+            kv.1.iter()
+                .map(|v| v.1)
+                .filter(|v| match mode {
+                    Mode::Similar => v > &cutoff,
+                    Mode::Dissimilar => v < &cutoff,
+                })
+                .sum(),
+        )
+    }));
+
+    match mode {
+        Mode::Similar => {
+            sim_sums.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        }
+        Mode::Dissimilar => {
+            sim_sums.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        }
+    }
+
+    let nadir_probes = sim_sums[..25].to_vec();
+
+    Ok(web::Json(NadirResult(nadir_probes)))
 }
 
-fn p404(req: &HttpRequest) -> Result<Json<String>> {
-    Ok(Json(("not found").to_string()))
+fn p404(req: &HttpRequest) -> std::io::Result<web::Json<String>> {
+    Ok(web::Json(("not found").to_string()))
 }
 
-fn main() {
-    let sys = actix::System::new("probe-similarity");
-    // let similarity_map = match load_with_cursor_single_thread() {
-    //     Ok(sm) => Arc::new(sm),
-    //     Err(e) => {
-    //         println!("{}", e);
-    //         std::process::exit(1);
-    //     }
-    // };
-
+#[actix_rt::main]
+async fn main() -> std::io::Result<()> {
+    // let sys = actix::System::new("probe-similarity");
     let similarity_map = match load_avro_from_file_multithreaded() {
         Ok(sm) => Arc::new(sm),
         Err(e) => {
@@ -574,29 +635,34 @@ fn main() {
         }
     };
 
+    // let similarity_map = match load_avro_from_file_multithreaded() {
+    //     Ok(sm) => Arc::new(sm),
+    //     Err(e) => {
+    //         println!("{}", e);
+    //         std::process::exit(1);
+    //     }
+    // };
+
     let bind_address = match get_second_arg() {
         Ok(ba) => ba.into_string().unwrap(),
         Err(_) => "127.0.0.1:8100".to_string(),
     };
+    println!("Started http server on {}", &bind_address);
 
-    server::new(move || {
-        vec![
-            App::with_state(AppState {
+    HttpServer::new(move || {
+        App::new()
+            .data(AppState {
                 similarity_map: Arc::clone(&similarity_map),
             })
-            .prefix("/probe-similarity")
-            .resource("/nadir", |r| r.method(http::Method::GET).with(nadir))
-            .resource("/{prb_id}", |r| r.method(http::Method::GET).with(index))
-            .boxed(),
-            App::new()
-                .default_resource(|r| r.method(http::Method::GET).f(&p404))
-                .boxed(),
-        ]
+            .service(
+                web::scope("/probe-similarity")
+                    .route("/nadir", web::get().to(nadir))
+                    .route("/{prb_id}", web::get().to(index)),
+            )
+            // .prefix("/probe-similarity")
+            .route("/", web::get().to(index))
     })
-    .bind(&bind_address)
-    .unwrap()
-    .start();
-
-    println!("Started http server on {}", &bind_address);
-    let _ = sys.run();
+    .bind("127.0.0.1:8100")?
+    .run()
+    .await
 }

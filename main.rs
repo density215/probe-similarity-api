@@ -26,6 +26,7 @@ use std::thread;
 use actix_web::{http, web, App, HttpRequest, HttpServer};
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
+use regex::Regex;
 use time::SteadyTime;
 
 use avro_rs::Reader;
@@ -38,7 +39,9 @@ use avro_rs::Writer;
 use rand::prelude::*;
 
 const BQ_DATA_PATH: &str = "./bq_data";
-const BQ_FILE_REGEX: &str = "jaccard_similarity_ipv4_2019-12-16_";
+const BQ_FILE_REGEX: &str = "jaccard_similarity_ipv4";
+const BQ_REGEX: &str = "_2019-12-16_";
+// const BQ_DATE_REGEX: &str = r"_^\d{4}-\d{2}-\d{2}_";
 
 fn load_avro_from_stdin() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<dyn Error>> {
     let start_time = SteadyTime::now();
@@ -168,7 +171,9 @@ fn load_avro_from_file() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<dyn Error
     Ok(similarity_map)
 }
 
-fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<dyn Error>> {
+fn load_avro_from_file_multithreaded(
+    src_files: Vec<std::path::PathBuf>,
+) -> Result<(BTreeMap<u32, Vec<(u32, f32)>>, String), Box<dyn Error>> {
     let start_time = SteadyTime::now();
 
     let schema = r#"{
@@ -185,24 +190,26 @@ fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
 
     let reader_schema = Schema::parse_str(schema).unwrap();
 
-    let data_dir = read_dir(BQ_DATA_PATH)?;
+    // extract the base name from the files vector,
+    // will be returned from this function so that
+    // it can be used to compare to another run of select_files
+    // to see if new files are available.
+    let base_name: String;
+    match src_files.get(0) {
+        Some(b_n) => {
+            base_name = b_n.file_name().unwrap().to_str().unwrap()
+                [..(BQ_FILE_REGEX.len() + BQ_REGEX.len())]
+                .to_string();
+        }
+        None => {
+            return Err(From::from(format!(
+                "No suitable files found in {}.",
+                BQ_DATA_PATH
+            )));
+        }
+    };
 
-    let f_map: Vec<std::path::PathBuf> = data_dir
-        .map(|f| -> Option<std::path::PathBuf> {
-            let file = f.unwrap();
-            let file_name = &file.file_name();
-            if &file_name.to_str().unwrap()[..BQ_FILE_REGEX.len()] == BQ_FILE_REGEX {
-                let file_path = file.path();
-                println!("selected {:?}...", file_path);
-                Some(file_path)
-            } else {
-                None
-            }
-        })
-        .filter_map(|f| f)
-        .collect();
-
-    let similarity_map = f_map
+    let similarity_map = src_files
         .par_iter()
         .fold(
             || (0, BTreeMap::new()),
@@ -275,7 +282,38 @@ fn load_avro_from_file_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>,
         dur.num_milliseconds() as f32 / 1000.0
     );
     println!("grand total of {} probes in map", similarity_map.1.len());
-    Ok(similarity_map.1)
+    Ok((similarity_map.1, base_name))
+}
+
+fn check_updated_files(
+    current_base_name: &String,
+) -> Result<Option<Vec<std::path::PathBuf>>, Box<dyn Error>> {
+    let updated_files: Option<Vec<std::path::PathBuf>>;
+    match select_latest_files(BQ_DATA_PATH) {
+        Ok(files) => {
+            if files.get(0).is_some()
+                && &files[0].file_name().unwrap().to_string_lossy().to_string()
+                    [..(BQ_FILE_REGEX.len() + BQ_REGEX.len())]
+                    != current_base_name
+            {
+                println!("new files found...");
+                println!("current base name: {}", current_base_name);
+                println!(
+                    "new base name: {}",
+                    files[0].file_name().unwrap().to_string_lossy().to_string()
+                );
+                updated_files = Some(files);
+            } else {
+                updated_files = None;
+            };
+        }
+        Err(e) => {
+            return Err(From::from(
+                "Error occurred while checking for updated files...",
+            ))
+        }
+    };
+    Ok(updated_files)
 }
 
 fn load_with_bufreader_multithreaded() -> Result<BTreeMap<u32, Vec<(u32, f32)>>, Box<dyn Error>> {
@@ -1009,11 +1047,6 @@ async fn similarity_for_prb_id_prb_id(
                 .1,
         }],
     }))
-
-    // return Err(std::io::Error::new(
-    //     std::io::ErrorKind::Other,
-    //     "not implemented",
-    // ));
 }
 
 #[derive(Deserialize)]
@@ -1095,26 +1128,68 @@ async fn similarity_for_request_prb_ids(
         count: probe_vecs.len(),
         result: SimilarProbe::new_vec_of(probe_vecs.to_owned()),
     }))
-
-    // return Err(std::io::Error::new(
-    //     std::io::ErrorKind::Other,
-    //     "not implemented",
-    // ));
 }
 
 fn p404(req: &HttpRequest) -> std::io::Result<web::Json<String>> {
     Ok(web::Json(("not found").to_string()))
 }
 
+// Try to locate the latest files from BQ by
+// reading the dirname passed into the function and
+// then making vectors of files that have similar names,
+// basically the first (BQ_FILE_REGEX + BQ_REGEX) characters are
+// the same within a batch. Then take the batch with most recent creation
+// timestamps.
+fn select_latest_files(data_path: &str) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
+    let data_dir = read_dir(data_path)?;
+    let mut newest_created: Option<std::time::SystemTime> = None;
+
+    let ordered_paths: BTreeMap<String, (Vec<std::path::PathBuf>, std::time::SystemTime)> =
+        data_dir.fold(
+            BTreeMap::new(),
+            |mut f_a: BTreeMap<String, (Vec<std::path::PathBuf>, std::time::SystemTime)>,
+             f: Result<std::fs::DirEntry, _>| {
+                if let Ok(ff) = f {
+                    let c = &ff.metadata().unwrap().created().unwrap();
+                    let f_n = ff.file_name().to_str().unwrap().to_owned();
+                    let n_c = if let Some(n_c) = newest_created {
+                        n_c
+                    } else {
+                        *c
+                    };
+
+                    if f_n[..BQ_FILE_REGEX.len()] == *BQ_FILE_REGEX {
+                        let f_entry = f_a
+                            .entry(f_n[..(BQ_FILE_REGEX.len() + BQ_REGEX.len())].to_string())
+                            .or_insert((vec![], *c));
+                        f_entry.0.push(ff.path());
+
+                        if n_c <= *c {
+                            newest_created = Some(*c);
+                        }
+                    }
+                }
+                f_a
+            },
+        );
+
+    let mut select_paths = ordered_paths.values().collect::<Vec<_>>();
+    select_paths.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    Ok(select_paths.first().unwrap().0.to_vec())
+}
+
 fn clear_sim_map(sim_map_lock: &Arc<RwLock<BTreeMap<u32, Vec<(u32, f32)>>>>) {
     println!("clearing simularity map...");
     *sim_map_lock.write().unwrap() = BTreeMap::new();
-    // *asns_arc.write().unwrap() = Arc::new(asns);
 }
 
-fn update_sim_map(sim_map_lock: &Arc<RwLock<BTreeMap<u32, Vec<(u32, f32)>>>>) {
-    let similarity_map = match load_avro_from_file_multithreaded() {
-        Ok(sm) => sm,
+fn load_new_sim_map_and_replace(
+    sim_map_lock: &Arc<RwLock<BTreeMap<u32, Vec<(u32, f32)>>>>,
+    files: Vec<std::path::PathBuf>,
+) {
+    let similarity_map = match load_avro_from_file_multithreaded(files) {
+        Ok((sm, _)) => sm,
         Err(e) => {
             println!("{}", e);
             std::process::exit(1);
@@ -1125,22 +1200,15 @@ fn update_sim_map(sim_map_lock: &Arc<RwLock<BTreeMap<u32, Vec<(u32, f32)>>>>) {
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
-    // let sys = actix::System::new("probe-similarity");
-    let similarity_map = match load_avro_from_file_multithreaded() {
-        Ok(sm) => Arc::new(RwLock::new(sm)),
+    let src_files = select_latest_files(BQ_DATA_PATH).unwrap();
+
+    let (similarity_map, base_name) = match load_avro_from_file_multithreaded(src_files) {
+        Ok((sm, bn)) => (Arc::new(RwLock::new(sm)), bn),
         Err(e) => {
             println!("{}", e);
             std::process::exit(1);
         }
     };
-
-    // let similarity_map = match load_avro_from_file_multithreaded() {
-    //     Ok(sm) => Arc::new(sm),
-    //     Err(e) => {
-    //         println!("{}", e);
-    //         std::process::exit(1);
-    //     }
-    // };
 
     let bind_address = match get_second_arg() {
         Ok(ba) => ba.into_string().unwrap(),
@@ -1148,10 +1216,22 @@ async fn main() -> std::io::Result<()> {
     };
     println!("Started http server on {}", &bind_address);
 
+    // Fire up a thread that will look for available updates,
+    // load and swap it out it with the current state
     let sim_map_clone = similarity_map.clone();
     thread::spawn(move || loop {
         thread::sleep(std::time::Duration::from_secs(70));
-        clear_sim_map(&sim_map_clone);
+        println!("checking for new files...");
+        let new_files = check_updated_files(&base_name).unwrap();
+        match new_files {
+            Some(files) => {
+                println!("found new files, loading...");
+                load_new_sim_map_and_replace(&sim_map_clone, files);
+            }
+            None => {
+                println!("no new files found...");
+            }
+        }
     });
 
     HttpServer::new(move || {
@@ -1177,8 +1257,6 @@ async fn main() -> std::io::Result<()> {
                     )
                     .route("/probe/{prb_id}", web::get().to(similarities_for_prb_id)),
             )
-        // .prefix("/probe-similarity")
-        // .route("/", web::get().to(similarities_for_prb_id))
     })
     .bind("127.0.0.1:8100")?
     .run()

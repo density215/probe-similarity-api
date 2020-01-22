@@ -21,6 +21,7 @@ rayon = '1.0.2'
 time = '0.1.40'
 quickersort = '3.0.1'
 rand = '0.7'
+regex = '1'
 
 [dependencies.avro-rs]
 version = '0.6'

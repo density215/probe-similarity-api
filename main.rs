@@ -286,23 +286,24 @@ fn load_avro_from_file_multithreaded(
 }
 
 fn check_updated_files(
-    current_base_name: &String,
-) -> Result<Option<Vec<std::path::PathBuf>>, Box<dyn Error>> {
-    let updated_files: Option<Vec<std::path::PathBuf>>;
+    base_name: &String,
+) -> Result<Option<(Vec<std::path::PathBuf>, String)>, Box<dyn Error>> {
+    let updated_files: Option<(Vec<std::path::PathBuf>, String)>;
+    let new_base_name: Option<String> = None;
     match select_latest_files(BQ_DATA_PATH) {
         Ok(files) => {
             if files.get(0).is_some()
                 && &files[0].file_name().unwrap().to_string_lossy().to_string()
                     [..(BQ_FILE_REGEX.len() + BQ_REGEX.len())]
-                    != current_base_name
+                    != base_name
             {
                 println!("new files found...");
-                println!("current base name: {}", current_base_name);
-                println!(
-                    "new base name: {}",
-                    files[0].file_name().unwrap().to_string_lossy().to_string()
-                );
-                updated_files = Some(files);
+                println!("current base name: {}", base_name);
+                let new_base_name = files[0].file_name().unwrap().to_string_lossy()
+                    [..(BQ_FILE_REGEX.len() + BQ_REGEX.len())]
+                    .to_string();
+                println!("new base name: {}", new_base_name);
+                updated_files = Some((files, new_base_name));
             } else {
                 updated_files = None;
             };
@@ -592,19 +593,20 @@ async fn similarities_for_prb_id(
             // probes_set.iter().for_each(|p| println!("{:?}", p.prb_id));
             probes_set
         })
-        .fold(
-            HashSet::new(),
-            |intersect_probes: HashSet<SimilarProbe>, probes_set: HashSet<SimilarProbe>| {
-                if intersect_probes.len() != 0 {
-                    intersect_probes
-                        .intersection(&probes_set)
-                        .cloned()
-                        .collect()
-                } else {
-                    probes_set
-                }
-            },
-        );
+        // .fold(
+        //     HashSet::new(),
+        //     |intersect_probes: HashSet<SimilarProbe>, probes_set: HashSet<SimilarProbe>| {
+        //         if intersect_probes.len() != 0 {
+        //             println!("this cannot happen");
+        //             intersect_probes
+        //                 .intersection(&probes_set)
+        //                 .cloned()
+        //                 .collect()
+        //         } else {
+        //             probes_set
+        //         }
+        //     },
+        // );
 
     let mut v = hs
         .into_iter()
@@ -1049,12 +1051,84 @@ async fn similarity_for_prb_id_prb_id(
     }))
 }
 
+async fn similarity_for_prb_ids(
+    data: (
+        web::Data<AppState>,
+        web::Query<QueryInfo>,
+        web::Json<ProbesPayload>,
+    ),
+) -> std::io::Result<web::Json<JsonResult>> {
+    let (state, query, payload) = data;
+    let similarity_map = state.similarity_map.read().unwrap();
+    println!("post request w/ probe set: {:?}", &payload.prb_ids);
+
+    let mut query_err: Vec<&str> = vec![];
+    let mode = if let Some(m) = &query.mode {
+        match m.as_str() {
+            "similar" => Mode::Similar,
+            "dissimilar" => Mode::Dissimilar,
+            _ => {
+                query_err.push("mode");
+                Mode::Dissimilar
+            }
+        }
+    } else {
+        Mode::Dissimilar
+    };
+
+    let band = if let Some(b) = &query.band {
+        let v: Vec<f32> = b
+            .split(",")
+            .map(|s: &str| s.parse::<f32>().unwrap())
+            .collect::<Vec<_>>();
+        (*v.first().unwrap(), *v.last().unwrap())
+    } else {
+        (0.0, 1.0)
+    };
+
+    let limit: usize = if let Some(l) = query.limit {
+        l as usize
+    } else {
+        10
+    };
+
+    if query_err.len() > 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "queryparameter{}: `{}` invalid",
+                if query_err.len() == 1 { "" } else { "s" },
+                query_err.join("`,`")
+            ),
+        ));
+    };
+
+    // Ok(web::Json(JsonResult {
+    //     count: 1,
+    //     result: vec![SimilarProbe {
+    //         prb_id: path.prb_id2,
+    //         similarity: similarity_map
+    //             .get(&path.prb_id1)
+    //             .unwrap()
+    //             .into_iter()
+    //             .find(|(prb_id, _)| prb_id == &path.prb_id2)
+    //             .unwrap()
+    //             .1,
+    //     }],
+    // }))
+
+    return Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "not implemented",
+    ));
+}
+
 #[derive(Deserialize)]
 struct ProbesPayload {
     prb_ids: Vec<u32>,
 }
 
-async fn similarity_for_request_prb_ids(
+async fn similarity_for_prb_set(
     // info: web::Json<ProbesPayload>,
     data: (
         web::Data<AppState>,
@@ -1202,7 +1276,7 @@ fn load_new_sim_map_and_replace(
 async fn main() -> std::io::Result<()> {
     let src_files = select_latest_files(BQ_DATA_PATH).unwrap();
 
-    let (similarity_map, base_name) = match load_avro_from_file_multithreaded(src_files) {
+    let (similarity_map, mut base_name) = match load_avro_from_file_multithreaded(src_files) {
         Ok((sm, bn)) => (Arc::new(RwLock::new(sm)), bn),
         Err(e) => {
             println!("{}", e);
@@ -1226,7 +1300,8 @@ async fn main() -> std::io::Result<()> {
         match new_files {
             Some(files) => {
                 println!("found new files, loading...");
-                load_new_sim_map_and_replace(&sim_map_clone, files);
+                load_new_sim_map_and_replace(&sim_map_clone, files.0);
+                base_name = files.1;
             }
             None => {
                 println!("no new files found...");
@@ -1242,7 +1317,7 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::scope("/probe-similarity")
                     .route("/nadir", web::get().to(nadir))
-                    .route("/probe-set", web::post().to(similarity_for_request_prb_ids))
+                    .route("/probe-set", web::post().to(similarity_for_prb_set))
                     .route(
                         "/recursive/{prb_id}",
                         web::get().to(recursive_dissimilarities_for_prb_id),
@@ -1255,7 +1330,8 @@ async fn main() -> std::io::Result<()> {
                         "/probes/{prb_id1}/{prb_id2}",
                         web::get().to(similarity_for_prb_id_prb_id),
                     )
-                    .route("/probe/{prb_id}", web::get().to(similarities_for_prb_id)),
+                    .route("/probe/{prb_id}", web::get().to(similarities_for_prb_id))
+                    .route("/probes/", web::post().to(similarity_for_prb_ids)),
             )
     })
     .bind("127.0.0.1:8100")?

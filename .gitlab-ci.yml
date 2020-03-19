@@ -11,5 +11,5 @@ build:
     - echo "$AWS_EC2_PEM" > atlas-probesim-dev.pem
     - chmod 0400 atlas-probesim-dev.pem
     - cat ~/.ssh/known_hosts
-    - ssh-keyscan ec2-52-59-192-252.eu-central-1.compute.amazonaws.com
-    - scp -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/tmp/
+    # - ssh-keyscan ec2-52-59-192-252.eu-central-1.compute.amazonaws.com
+    - scp -o StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/tmp/

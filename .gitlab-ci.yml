@@ -8,5 +8,6 @@ build:
   script:
     - rustup toolchain install nightly
     - cargo +nightly build --release
-    - scp target/release/probe-similarity atlas-probesim.dev.ripe.net:/tmp/
-  
+    - $AWS_EC2_PEM > atlas-probesim-dev.pem
+    - chmod 0400 atlas-probesim-dev.pem
+    - scp -o "IdentityFile=atlas-probesim-dev-ssh.pem" target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/tmp/

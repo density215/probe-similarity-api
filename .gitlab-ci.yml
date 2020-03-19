@@ -6,6 +6,7 @@ build:
   stage: build
   image: "rust:latest"
   script:
+    - rustup toolchain install nightly
     - cargo +nightly build --release
     - scp target/release/probe-similarity atlas-probesim.dev.ripe.net:/tmp/
   

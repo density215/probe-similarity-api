@@ -1,0 +1,11 @@
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  image: "rust:latest"
+  script:
+    - cargo build --release
+    - scp target/release/probe-similarity atlas-probesim.dev.ripe.net:/tmp/
+  

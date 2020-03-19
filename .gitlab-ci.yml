@@ -1,8 +1,7 @@
 stages:
-  - build
-  - deploy
+  - copy
 
-build:
+build_api_server:
   stage: build
   image: "rust:latest"
   script:
@@ -11,3 +10,13 @@ build:
     - echo "$AWS_EC2_PEM" > atlas-probesim-dev.pem
     - chmod 0400 atlas-probesim-dev.pem
     - scp -o StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/~/probe-similarity
+
+cp_current_gcloud_files:
+  stage: copy
+  image: google/cloud-sdk
+  script:
+    - mkdir -p bq_data
+    # Get the most current files, which are two days behind in numbering (well, for now)
+    # TODO: This some very brittle thing that needs to be improved upon.
+    - let tday=`date +"%d"`-2; gsutil cp gs://ripencc_rnd_processes/jaccard/jaccard_similarity_ipv4_`date +"%Y-%m"`-${tday}_* ./bq_data
+    - 

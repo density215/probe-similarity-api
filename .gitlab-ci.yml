@@ -19,4 +19,3 @@ cp_current_gcloud_files:
     # Get the most current files, which are two days behind in numbering (well, for now)
     # TODO: This some very brittle thing that needs to be improved upon.
     - let tday=`date +"%d"`-2; gsutil cp gs://ripencc_rnd_processes/jaccard/jaccard_similarity_ipv4_`date +"%Y-%m"`-${tday}_* ./bq_data
-    - 

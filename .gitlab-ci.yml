@@ -10,5 +10,6 @@ build:
     - cargo +nightly build --release
     - echo "$AWS_EC2_PEM" > atlas-probesim-dev.pem
     - chmod 0400 atlas-probesim-dev.pem
-    - cat atlas-probesim-dev.pem
+    - ssh-keygen -R ec2-52-59-192-252.eu-central-1.compute.amazonaws.com
+    - ssh-keyscan ec2-52-59-192-252.eu-central-1.compute.amazonaws.com >> ~/.ssh/known_hosts
     - scp -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/tmp/

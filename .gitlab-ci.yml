@@ -2,7 +2,7 @@ stages:
   - build
   - deploy
 
-build_api_server:
+build:api_server:
   stage: build
   image: "rust:latest"
   script:
@@ -11,8 +11,9 @@ build_api_server:
   artifacts:
     paths:
       - target/release/probe-similarity
+    expire_in: 1 hour
 
-cp_current_gcloud_files:
+build:current_gcloud_files:
   stage: build
   image: "google/cloud-sdk"
   script:
@@ -25,6 +26,7 @@ cp_current_gcloud_files:
   artifacts:
     paths:
       - bq_data/
+    expire_in: 1 hour
     
 deploy_server:
   stage: deploy
@@ -34,6 +36,6 @@ deploy_server:
     - scp -o StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/
     - scp -ro StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem ./bq_data ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/
   dependencies:
-    - build:build_api_server
-    - build:cp_current_gcloud_files
+    - build:api_server
+    - build:current_gcloud_files
     

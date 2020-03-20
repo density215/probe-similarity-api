@@ -8,11 +8,16 @@ build:api_server:
   script:
     - rustup toolchain install nightly
     - cargo +nightly build --release
+  # artifacts make sure the build binary can
+  # be reached from later jobs.
   artifacts:
     paths:
       - target/release/probe-similarity
     expire_in: 1 hour
 
+# Files are created by BigQuery, then copied to
+# Google Cloud Storage. We'll copy from there
+# into the gitlab-runner
 build:current_gcloud_files:
   stage: build
   image: "google/cloud-sdk"
@@ -23,6 +28,8 @@ build:current_gcloud_files:
     - echo "$GCP_SERVICE_KEY" > gcloud-service-key.json # Google Cloud service accounts
     - gcloud auth activate-service-account --key-file gcloud-service-key.json
     - let tday=`date +"%d"`-2; gsutil -m cp gs://ripencc_rnd_processes/jaccard/jaccard_similarity_ipv4_`date +"%Y-%m"`-${tday}_* ./bq_data
+  # artifacts make sure the build binary can
+  # be reached from later jobs.
   artifacts:
     paths:
       - bq_data/
@@ -35,7 +42,13 @@ deploy_server:
     - chmod 0400 atlas-probesim-dev.pem
     - scp -o StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/probe-similarity-new
     - scp -ro StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem ./bq_data ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/
+    # make sure to allow the `ubuntu` user to enter the systemctl commands without interactive authentication, like so:
+    # %LimitedAdmins ALL=NOPASSWD: /bin/systemctl stop atlas-probesim-api.service
+    # %LimitedAdmins ALL=NOPASSWD: /bin/systemctl start atlas-probesim-api.service
+    # in /etc/sudoers
+    # Also note that the command should be issued as /bin/systemctl (full path)
     - ssh -o StrictHostKeyChecking=no -i atlas-probesim-dev.pem ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com "sudo /bin/systemctl stop atlas-probesim-api.service && rm /home/ubuntu/probe-similarity && mv /home/ubuntu/probe-similarity-new /home/ubuntu/probe-similarity && sudo /bin/systemctl start atlas-probesim-api.service"
+  # dependencies make sure the artifacts from former jobs are reachable from this one
   dependencies:
     - build:api_server
     - build:current_gcloud_files

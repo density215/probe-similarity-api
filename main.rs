@@ -23,7 +23,7 @@ use std::str;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use actix_web::{http, web, App, HttpRequest, HttpServer};
+use actix_web::{http, web, App, HttpRequest, HttpResponse, HttpServer};
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use regex::Regex;
@@ -286,23 +286,24 @@ fn load_avro_from_file_multithreaded(
 }
 
 fn check_updated_files(
-    current_base_name: &String,
-) -> Result<Option<Vec<std::path::PathBuf>>, Box<dyn Error>> {
-    let updated_files: Option<Vec<std::path::PathBuf>>;
+    base_name: &String,
+) -> Result<Option<(Vec<std::path::PathBuf>, String)>, Box<dyn Error>> {
+    let updated_files: Option<(Vec<std::path::PathBuf>, String)>;
+    let new_base_name: Option<String> = None;
     match select_latest_files(BQ_DATA_PATH) {
         Ok(files) => {
             if files.get(0).is_some()
                 && &files[0].file_name().unwrap().to_string_lossy().to_string()
                     [..(BQ_FILE_REGEX.len() + BQ_REGEX.len())]
-                    != current_base_name
+                    != base_name
             {
                 println!("new files found...");
-                println!("current base name: {}", current_base_name);
-                println!(
-                    "new base name: {}",
-                    files[0].file_name().unwrap().to_string_lossy().to_string()
-                );
-                updated_files = Some(files);
+                println!("current base name: {}", base_name);
+                let new_base_name = files[0].file_name().unwrap().to_string_lossy()
+                    [..(BQ_FILE_REGEX.len() + BQ_REGEX.len())]
+                    .to_string();
+                println!("new base name: {}", new_base_name);
+                updated_files = Some((files, new_base_name));
             } else {
                 updated_files = None;
             };
@@ -480,6 +481,7 @@ struct SimilarProbe {
 
 #[derive(Serialize)]
 struct JsonResult {
+    id: u32,
     count: usize,
     result: Vec<SimilarProbe>,
 }
@@ -565,53 +567,23 @@ async fn similarities_for_prb_id(
         ));
     };
 
-    let hs: HashSet<SimilarProbe> = path
-        .prb_id
-        .split(",")
-        .map(|prb_id_str| {
-            let prb_id = &prb_id_str.parse::<u32>().unwrap();
-            let mut probes_set: HashSet<SimilarProbe> = HashSet::new();
-
-            similarity_map
-                .get(prb_id)
-                .unwrap()
-                .into_iter()
-                .filter(|ps| {
-                    if mode == "dissimilar" {
-                        ps.1 <= cutoff
-                    } else {
-                        ps.1 >= cutoff
-                    }
-                })
-                .for_each(|v| {
-                    probes_set.insert(SimilarProbe {
-                        prb_id: v.0,
-                        similarity: v.1,
-                    });
-                });
-            // probes_set.iter().for_each(|p| println!("{:?}", p.prb_id));
-            probes_set
+    let prb_id = &path.prb_id.parse::<u32>().unwrap();
+    let mut v: Vec<SimilarProbe> = similarity_map
+        .get(prb_id)
+        .unwrap()
+        .iter()
+        .filter(|ps| {
+            if mode == "dissimilar" {
+                ps.1 <= cutoff
+            } else {
+                ps.1 >= cutoff
+            }
         })
-        .fold(
-            HashSet::new(),
-            |intersect_probes: HashSet<SimilarProbe>, probes_set: HashSet<SimilarProbe>| {
-                if intersect_probes.len() != 0 {
-                    intersect_probes
-                        .intersection(&probes_set)
-                        .cloned()
-                        .collect()
-                } else {
-                    probes_set
-                }
-            },
-        );
-
-    let mut v = hs
-        .into_iter()
-        .fold(Vec::new(), |mut vec: Vec<SimilarProbe>, p: SimilarProbe| {
-            vec.push(p);
-            vec
-        });
+        .map(|v| SimilarProbe {
+            prb_id: v.0,
+            similarity: v.1,
+        })
+        .collect::<Vec<_>>();
 
     v.sort_by(|a, b| {
         b.similarity
@@ -620,6 +592,7 @@ async fn similarities_for_prb_id(
     });
 
     Ok(web::Json(JsonResult {
+        id: *prb_id,
         count: v.len(),
         result: if limit == 0 { v } else { v[..limit].to_vec() },
     }))
@@ -696,6 +669,7 @@ async fn nadir(
     let nadir_probes = sim_sums[..25].to_vec();
 
     Ok(web::Json(JsonResult {
+        id: 0,
         count: nadir_probes.len(),
         result: SimilarProbe::new_vec_of(nadir_probes),
     }))
@@ -825,6 +799,7 @@ async fn recursive_dissimilarities_for_prb_id(
     _get_recursive_dissim_probes(&similarity_map, results, limit, &band);
     println!("--- end of query ---");
     Ok(web::Json(JsonResult {
+        id: *prb_id,
         count: results.len(),
         result: results.to_owned(),
     }))
@@ -1019,6 +994,7 @@ async fn aggregated_recursive_dissimilarities_for_prb_id(
     println!("result: {:?}", probe_vecs);
     println!("--- end of query ---");
     Ok(web::Json(JsonResult {
+        id: *prb_id,
         count: probe_vecs.len(),
         result: SimilarProbe::new_vec_of(probe_vecs.to_owned()),
     }))
@@ -1035,6 +1011,7 @@ async fn similarity_for_prb_id_prb_id(
     let similarity_map = state.similarity_map.read().unwrap();
 
     Ok(web::Json(JsonResult {
+        id: path.prb_id1,
         count: 1,
         result: vec![SimilarProbe {
             prb_id: path.prb_id2,
@@ -1049,12 +1026,122 @@ async fn similarity_for_prb_id_prb_id(
     }))
 }
 
+async fn similarity_for_prb_ids(
+    data: (
+        web::Data<AppState>,
+        web::Query<QueryInfo>,
+        web::Json<ProbesPayload>,
+    ),
+) -> std::io::Result<web::Json<Vec<JsonResult>>> {
+    let (state, query, payload) = data;
+    let similarity_map = state.similarity_map.read().unwrap();
+    println!("post request for multiple probes: {:?}", &payload.prb_ids);
+
+    let mut query_err: Vec<&str> = vec![];
+    let mode = if let Some(m) = &query.mode {
+        match m.as_str() {
+            "similar" => Mode::Similar,
+            "dissimilar" => Mode::Dissimilar,
+            _ => {
+                query_err.push("mode");
+                Mode::Dissimilar
+            }
+        }
+    } else {
+        Mode::Dissimilar
+    };
+
+    let band = if let Some(b) = &query.band {
+        let v: Vec<f32> = b
+            .split(",")
+            .map(|s: &str| s.parse::<f32>().unwrap())
+            .collect::<Vec<_>>();
+        (*v.first().unwrap(), *v.last().unwrap())
+    } else {
+        (0.0, 1.0)
+    };
+
+    let limit: usize = if let Some(l) = query.limit {
+        l as usize
+    } else {
+        10
+    };
+
+    if query_err.len() > 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "queryparameter{}: `{}` invalid",
+                if query_err.len() == 1 { "" } else { "s" },
+                query_err.join("`,`")
+            ),
+        ));
+    };
+
+    let prb_ids = &payload.prb_ids;
+    let vv = prb_ids
+        .iter()
+        .map(|prb_id| {
+            let v = match similarity_map.get(prb_id) {
+                Some(vv) => {
+                    let mut vvv = vv
+                        .iter()
+                        .filter(|ps| ps.1 <= band.1 && ps.1 >= band.0)
+                        .map(|v| SimilarProbe {
+                            prb_id: v.0,
+                            similarity: v.1,
+                        })
+                        .collect::<Vec<SimilarProbe>>();
+                    vvv.sort_by(|a, b| {
+                        b.similarity
+                            .partial_cmp(&a.similarity)
+                            .unwrap_or(Ordering::Equal)
+                    });
+                    vvv
+                }
+                _ => vec![],
+            };
+
+            if v.len() > 0 {
+                JsonResult {
+                    id: *prb_id,
+                    count: v.len(),
+                    result: if limit == 0 { v } else { v[..limit].to_vec() },
+                }
+            } else {
+                JsonResult {
+                    id: *prb_id,
+                    count: 0,
+                    result: vec![],
+                }
+            }
+        })
+        .filter(|v| v.count > 0)
+        .collect::<Vec<_>>();
+
+    Ok(web::Json(vv))
+
+    // Ok(web::Json(JsonResult {
+    //     count: 1,
+    //     result: vec![SimilarProbe {
+    //         prb_id: path.prb_id2,
+    //         similarity: similarity_map
+    //             .get(&path.prb_id1)
+    //             .unwrap()
+    //             .into_iter()
+    //             .find(|(prb_id, _)| prb_id == &path.prb_id2)
+    //             .unwrap()
+    //             .1,
+    //     }],
+    // }))
+}
+
 #[derive(Deserialize)]
 struct ProbesPayload {
     prb_ids: Vec<u32>,
 }
 
-async fn similarity_for_request_prb_ids(
+async fn similarity_for_prb_set(
     // info: web::Json<ProbesPayload>,
     data: (
         web::Data<AppState>,
@@ -1125,6 +1212,7 @@ async fn similarity_for_request_prb_ids(
     println!("result: {:?}", probe_vecs);
     println!("--- end of query ---");
     Ok(web::Json(JsonResult {
+        id: 0,
         count: probe_vecs.len(),
         result: SimilarProbe::new_vec_of(probe_vecs.to_owned()),
     }))
@@ -1202,7 +1290,7 @@ fn load_new_sim_map_and_replace(
 async fn main() -> std::io::Result<()> {
     let src_files = select_latest_files(BQ_DATA_PATH).unwrap();
 
-    let (similarity_map, base_name) = match load_avro_from_file_multithreaded(src_files) {
+    let (similarity_map, mut base_name) = match load_avro_from_file_multithreaded(src_files) {
         Ok((sm, bn)) => (Arc::new(RwLock::new(sm)), bn),
         Err(e) => {
             println!("{}", e);
@@ -1226,7 +1314,8 @@ async fn main() -> std::io::Result<()> {
         match new_files {
             Some(files) => {
                 println!("found new files, loading...");
-                load_new_sim_map_and_replace(&sim_map_clone, files);
+                load_new_sim_map_and_replace(&sim_map_clone, files.0);
+                base_name = files.1;
             }
             None => {
                 println!("no new files found...");
@@ -1242,20 +1331,32 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::scope("/probe-similarity")
                     .route("/nadir", web::get().to(nadir))
-                    .route("/probe-set", web::post().to(similarity_for_request_prb_ids))
+                    .route("/probe-set", web::post().to(similarity_for_prb_set))
                     .route(
                         "/recursive/{prb_id}",
                         web::get().to(recursive_dissimilarities_for_prb_id),
-                    )
-                    .route(
-                        "/aggregated-recursive/{prb_id}",
-                        web::get().to(aggregated_recursive_dissimilarities_for_prb_id),
                     )
                     .route(
                         "/probes/{prb_id1}/{prb_id2}",
                         web::get().to(similarity_for_prb_id_prb_id),
                     )
                     .route("/probe/{prb_id}", web::get().to(similarities_for_prb_id)),
+            )
+            .service(
+                web::resource("/aggregated-recursive/{prb_id}")
+                    .route(web::get().to(aggregated_recursive_dissimilarities_for_prb_id))
+                    .route(web::method(http::Method::OPTIONS).to(|| {
+                        println!("preflightin'");
+                        HttpResponse::Ok()
+                    })),
+            )
+            .service(
+                web::resource("/probes")
+                    .route(web::post().to(similarity_for_prb_ids))
+                    .route(web::method(http::Method::OPTIONS).to(|| {
+                        println!("preflightin'");
+                        HttpResponse::Ok()
+                    })),
             )
     })
     .bind("127.0.0.1:8100")?

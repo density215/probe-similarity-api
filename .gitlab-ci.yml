@@ -1,5 +1,6 @@
 stages:
   - build
+  - deploy
 
 build_api_server:
   stage: build

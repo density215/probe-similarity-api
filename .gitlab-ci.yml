@@ -9,7 +9,7 @@ build_api_server:
     - cargo +nightly build --release
     - echo "$AWS_EC2_PEM" > atlas-probesim-dev.pem
     - chmod 0400 atlas-probesim-dev.pem
-    - scp -o StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/users/home/ubuntu/
+    - scp -o StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/
 
 cp_current_gcloud_files:
   stage: build
@@ -21,4 +21,4 @@ cp_current_gcloud_files:
     - echo "$GCP_SERVICE_KEY" > gcloud-service-key.json # Google Cloud service accounts
     - gcloud auth activate-service-account --key-file gcloud-service-key.json
     - let tday=`date +"%d"`-2; gsutil cp gs://ripencc_rnd_processes/jaccard/jaccard_similarity_ipv4_`date +"%Y-%m"`-${tday}_* ./bq_data
-    - scp -ro StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem ./bq_data ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/users/home/ubuntu/
+    - scp -ro StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem ./bq_data ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/

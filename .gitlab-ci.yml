@@ -35,7 +35,7 @@ deploy_server:
     - chmod 0400 atlas-probesim-dev.pem
     - scp -o StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem target/release/probe-similarity ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/probe-similarity-new
     - scp -ro StrictHostKeyChecking=no -o IdentityFile=atlas-probesim-dev.pem ./bq_data ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com:/home/ubuntu/
-    - ssh -o StrictHostKeyChecking=no -i atlas-probesim-dev.pem ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com "systemctl stop atlas-probesim-api && rm /home/ubuntu/probe-similarity && mv /home/ubuntu/probe-similarity-new /home/ubuntu/probe-similarity && systemctl start atlas-probesim-api"
+    - ssh -o StrictHostKeyChecking=no -i atlas-probesim-dev.pem ubuntu@ec2-52-59-192-252.eu-central-1.compute.amazonaws.com "/bin/systemctl stop atlas-probesim-api.service && rm /home/ubuntu/probe-similarity && mv /home/ubuntu/probe-similarity-new /home/ubuntu/probe-similarity && /bin/systemctl start atlas-probesim-api.service"
   dependencies:
     - build:api_server
     - build:current_gcloud_files
